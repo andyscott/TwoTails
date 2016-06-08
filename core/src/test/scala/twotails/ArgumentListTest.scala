@@ -4,6 +4,7 @@ import org.scalatest.{ FlatSpec, Matchers }
 import annotation.tailrec
 import java.lang.StackOverflowError
 
+//These are general tests, not specific to multi-args or default params
 class Foo{
   @mutualrec final def yo(x: Int): Int = if(0 < x) yo(x-1) else 0
 }
@@ -22,6 +23,7 @@ class ErrBar{
   def two(x: Int): Int = if(0 < x) one(x-2) else 0
 }
 
+//this is actually a multi-args type test
 class Bippy{
   @mutualrec final def one(x: Int, y: Int = 1): Int = if(0 < x) two(y, x) else 0
   @mutualrec final def two(x: Int, y: Int = 1): Int = if(0 < x) one(x-1, y-1) else 0

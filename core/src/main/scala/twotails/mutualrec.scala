@@ -132,35 +132,17 @@ class MutualRecComponent(val plugin: Plugin, val global: Global)
     }
 
     def mkNewMethodRhs(methSym: Symbol, defdef: List[Tree]): Tree ={
-      val defSymbols: Map[Symbol, Tree] = defdef.zipWithIndex.map{
-        case (d, i) => (d.symbol, localTyper.typed(Literal(Constant(i))))
-      }(breakOut)
-      val callTransformer = new MutualCallTransformer(methSym, defSymbols)
-      val defrhs = defdef.map{ tree =>
-        val DefDef(_, _, _, vparams, _, rhs) = tree
-
-        //shamelessly taken from @retronym's example #20 of the Scalac survival guide.
-        val origTparams = tree.symbol.info.typeParams
-        val (oldSkolems, deskolemized) = if(origTparams.isEmpty) (Nil, Nil) else{
-          val skolemSubst = MMap.empty[Symbol, Symbol]
-          rhs.foreach{
-            _.tpe.foreach {
-              case tp if tp.typeSymbolDirect.isSkolem =>
-                val tparam = tp.typeSymbolDirect.deSkolemize
-                if (!skolemSubst.contains(tparam) && origTparams.contains(tparam)) {
-                  skolemSubst(tp.typeSymbolDirect) = methSym.typeParams(origTparams.indexOf(tparam))
-                }
-              case _ =>
-            }
-          }
-          skolemSubst.toList.unzip
-        }
-
-        val old = oldSkolems ::: tree.symbol.typeParams ::: vparams.flatMap(_.map(_.symbol))
+      val substDef = defdef.zipWithIndex.map{
+        case (d, i) => SubstDefDef(d, localTyper.typed(Literal(Constant(i))))
+      }
+      val callTransformer = new MutualCallTransformer(methSym, substDef.map{ x => (x.symbol, x) }(breakOut))
+      val defrhs = substDef.map{ subst =>
+        val (oldSkolems, deskolemized) = subst.skolems(methSym)
+        val old = oldSkolems ::: subst.typeParams ::: subst.vparamSymbols
         val neww = deskolemized ::: methSym.typeParams ::: methSym.info.paramss.flatten.drop(1)
 
-        callTransformer.transform(rhs)
-          .changeOwner(tree.symbol -> methSym)
+        callTransformer.transform(subst.rhs)
+          .changeOwner(subst.symbol -> methSym)
           .substituteSymbols(old, neww)
       }
 
@@ -180,7 +162,7 @@ class MutualRecComponent(val plugin: Plugin, val global: Global)
 
     def forwardTrees(methSym: Symbol, defdef: List[Tree]): List[Tree] = defdef.zipWithIndex.map{
   	  case (tree, indx) =>
-        val DefDef(mods, _, _, vparams @ (vp :: vps), _, _) = tree
+        val DefDef(_, _, _, vp :: vps, _, _) = tree
         val newVp = localTyper.typed(Literal(Constant(indx))) :: vp.map(p => gen.paramToArg(p.symbol))
         val refTree = gen.mkAttributedRef(tree.symbol.owner.thisType, methSym)
         val forwarderTree = (Apply(refTree, newVp) /: vps){
@@ -192,21 +174,60 @@ class MutualRecComponent(val plugin: Plugin, val global: Global)
     }
   }
 
-  class MutualCallTransformer(methSym: Symbol, symbols: Map[Symbol, Tree]) extends Transformer{
+  class MutualCallTransformer(methSym: Symbol, subst: Map[Symbol, SubstDefDef]) extends Transformer{
     //TODO: FIgure out type parameters
     override def transform(tree: Tree): Tree = tree match{
-      case Apply(fn, args) if symbols.contains(fn.symbol) => multiArgs(tree) 
+      case Apply(fn, args) if subst.contains(fn.symbol) => multiArgs(tree) 
       case _ => super.transform(tree)
     }
 
-    def multiArgs(tree: Tree):Tree = tree match{
+    def multiArgs(tree: Tree, lvl: Int=0):Tree = tree match{
       case Apply(fn, args) => 
-        multiArgs(fn) match{
+        val newArgs = args //TODO: figure out default and then named default values.
+        multiArgs(fn, lvl+1) match{
           case f @ Apply(_, _) => treeCopy.Apply(tree, f, transformTrees(args))
-          case f => treeCopy.Apply(tree, f, symbols(fn.symbol) :: transformTrees(args))
+          case f => treeCopy.Apply(tree, f, subst(fn.symbol).indx :: transformTrees(args))
         }
       case TypeApply(fn, targs) => treeCopy.TypeApply(tree, multiArgs(fn), targs)
       case _ => gen.mkAttributedRef(methSym)
+    }
+  }
+
+  case class SubstDefDef(tree: Tree, indx: Tree){
+    def symbol = tree.symbol
+    def typeParams = tree.symbol.typeParams
+    def vparamSymbols = vparams.flatMap(_.map(_.symbol))
+    val DefDef(_, _, _, vparams, _, rhs) = tree
+
+    //shamelessly taken from @retronym's example #20 of the Scalac survival guide.
+    def skolems(methSym: Symbol) ={
+      val origTparams = tree.symbol.info.typeParams
+      if(origTparams.isEmpty) (Nil, Nil) else{
+        val skolemSubst = MMap.empty[Symbol, Symbol]
+        rhs.foreach{
+          _.tpe.foreach {
+            case tp if tp.typeSymbolDirect.isSkolem =>
+              val tparam = tp.typeSymbolDirect.deSkolemize
+              if (!skolemSubst.contains(tparam) && origTparams.contains(tparam)) {
+                skolemSubst(tp.typeSymbolDirect) = methSym.typeParams(origTparams.indexOf(tparam))
+              }
+            case _ =>
+          }
+        }
+        skolemSubst.toList.unzip
+      }
+    }
+
+    val (defaultArgs, namedDefaultArgs) ={
+      val namedArgs = Map.newBuilder[TermName, Tree]
+      val args = vparams.map{
+        _.collect{
+          case ValDef(_, name, _, rhs) => 
+            namedArgs += (name -> rhs)
+            rhs
+        }
+      }
+      (args, namedArgs result ())
     }
   }
 }
